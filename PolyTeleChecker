@@ -4,7 +4,8 @@ Polymarket New Markets Notifier → Telegram
 Polls the Polymarket CLOB/Gamma API for newly created markets
 and sends a Telegram notification for each one not seen before.
 
-Read Readme file to prepare before running the script.
+Read Readme file to prepare before running the script and make sure to add your BOT TOKEN where required.
+
 
 """
 
@@ -16,7 +17,7 @@ import requests
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ─── Configuration ────────────────────────────────────────────────────────────
+# ─── Config ────────────────────────────────────────────────────────────
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "YOUR_CHAT_ID_HERE")
