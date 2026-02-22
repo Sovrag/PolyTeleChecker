@@ -1,0 +1,161 @@
+"""
+Polymarket New Markets Notifier → Telegram
+==========================================
+Polls the Polymarket CLOB/Gamma API for newly created markets
+and sends a Telegram notification for each one not seen before.
+
+Read Readme file to prepare before running the script.
+
+"""
+
+import os
+import json
+import time
+import logging
+import requests
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "YOUR_CHAT_ID_HERE")
+
+# How often to poll Polymarket (seconds)
+POLL_INTERVAL = 60
+
+# How many markets to fetch per request
+PAGE_SIZE = 20
+
+# File to persist seen market IDs across restarts
+SEEN_IDS_FILE = Path("seen_market_ids.json")
+
+# Polymarket Gamma (markets metadata) API
+GAMMA_API = "https://gamma-api.polymarket.com/markets"
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger(__name__)
+
+# ─── Persistence ──────────────────────────────────────────────────────────────
+
+def load_seen_ids() -> set:
+    if SEEN_IDS_FILE.exists():
+        return set(json.loads(SEEN_IDS_FILE.read_text()))
+    return set()
+
+def save_seen_ids(ids: set) -> None:
+    SEEN_IDS_FILE.write_text(json.dumps(list(ids)))
+
+# ─── Polymarket API ───────────────────────────────────────────────────────────
+
+def fetch_latest_markets(limit: int = PAGE_SIZE) -> list[dict]:
+    """Return the most recently created markets."""
+    params = {
+        "limit": limit,
+        "order": "createdAt",
+        "ascending": "false",
+        "active": "true",
+    }
+    try:
+        resp = requests.get(GAMMA_API, params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as exc:
+        log.error("Failed to fetch markets: %s", exc)
+        return []
+
+# ─── Telegram ─────────────────────────────────────────────────────────────────
+
+def send_telegram(message: str) -> bool:
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        resp.raise_for_status()
+        return True
+    except requests.RequestException as exc:
+        log.error("Telegram send failed: %s", exc)
+        return False
+
+def format_market_message(market: dict) -> str:
+    title       = market.get("question") or market.get("title") or "Unknown"
+    market_id   = market.get("id", "")
+    end_date    = market.get("endDate", "")
+    volume      = market.get("volume", 0)
+    url         = f"https://polymarket.com/event/{market.get('slug', market_id)}"
+
+    # Parse end date
+    end_str = ""
+    if end_date:
+        try:
+            dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            end_str = dt.strftime("%b %d, %Y")
+        except ValueError:
+            end_str = end_date
+
+    vol_str = f"${float(volume):,.0f}" if volume else "N/A"
+
+    lines = [
+        "🆕 <b>New Polymarket Bet</b>",
+        "",
+        f"📋 <b>{title}</b>",
+        f"📅 Ends: {end_str}" if end_str else "",
+        f"💰 Volume: {vol_str}",
+        f"🔗 <a href='{url}'>Open on Polymarket</a>",
+    ]
+    return "\n".join(line for line in lines if line != "")
+
+# ─── Main loop ────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    if "YOUR_BOT_TOKEN_HERE" in TELEGRAM_BOT_TOKEN:
+        log.warning(
+            "Telegram credentials not set. "
+            "Edit the script or set TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID env vars."
+        )
+
+    log.info("Starting Polymarket notifier (poll every %ds)", POLL_INTERVAL)
+    seen_ids = load_seen_ids()
+
+    # On the very first run, seed seen_ids without sending notifications
+    # so we don't spam on startup.
+    if not seen_ids:
+        log.info("First run — seeding known markets (no notifications sent yet).")
+        markets = fetch_latest_markets(limit=50)
+        seen_ids = {m["id"] for m in markets if "id" in m}
+        save_seen_ids(seen_ids)
+        log.info("Seeded %d market IDs.", len(seen_ids))
+
+    while True:
+        try:
+            markets = fetch_latest_markets()
+            new_markets = [m for m in markets if m.get("id") not in seen_ids]
+
+            if new_markets:
+                log.info("Found %d new market(s).", len(new_markets))
+                for market in reversed(new_markets):  # oldest first
+                    msg = format_market_message(market)
+                    if send_telegram(msg):
+                        log.info("Notified: %s", market.get("question", market.get("id")))
+                    seen_ids.add(market["id"])
+                save_seen_ids(seen_ids)
+            else:
+                log.info("No new markets found.")
+
+        except Exception as exc:
+            log.error("Unexpected error: %s", exc)
+
+        time.sleep(POLL_INTERVAL)
+
+if __name__ == "__main__":
+    main()
